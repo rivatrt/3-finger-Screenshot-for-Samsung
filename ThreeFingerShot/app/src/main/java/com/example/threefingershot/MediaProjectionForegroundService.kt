@@ -75,23 +75,22 @@ class MediaProjectionForegroundService : Service() {
         val code = intent?.getIntExtra("code", 0) ?: 0
         val data = intent?.getParcelableExtra<Intent>("data")
 
-        if (code != 0 && data != null) {
+        if (code != 0 && data != null && !isProjectionReady) {
             lastResultCode = code
             lastIntentData = data
+            val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = mediaProjectionManager.getMediaProjection(code, data)
             isProjectionReady = true
         }
 
-        if (isProjectionReady && lastIntentData != null) {
-            takeScreenshot(lastResultCode, lastIntentData!!)
+        if (isProjectionReady && mediaProjection != null) {
+            takeScreenshot()
         }
 
         return START_STICKY
     }
 
-    fun takeScreenshot(resultCode: Int, data: Intent) {
-        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data)
-
+    fun takeScreenshot() {
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             val displayMetrics = DisplayMetrics()
             val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager

@@ -7,7 +7,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
-import android.graphics.Path
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
@@ -15,6 +14,8 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.Button
+import android.widget.FrameLayout
 import androidx.core.app.NotificationCompat
 
 class ScreenshotService : Service() {
@@ -22,100 +23,91 @@ class ScreenshotService : Service() {
     private val CHANNEL_ID = "ScreenshotServiceChannel"
 
     private var windowManager: WindowManager? = null
-    private var fullScreenOverlay: View? = null
+    private var floatingButtonView: View? = null
 
-    private var startY1 = 0f
-    private var startY2 = 0f
-    private var startY3 = 0f
-    private var isTracking = false
-    private val SWIPE_THRESHOLD = 150f
-
-    // For pass-through recording
-    private val recordedPath = Path()
+    // Draggable button variables
+    private var initialX = 0
+    private var initialY = 0
+    private var initialTouchX = 0f
+    private var initialTouchY = 0f
+    private var isMoved = false
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         startForeground(1, createNotification())
 
-        // Android 11+ uses native onGesture(30). For < 11 we need a full screen intercept-and-dispatch overlay.
+        // Android 11+ uses native onGesture(30) with flagRequestMultiFingerGestures.
+        // For < 11 we show a floating assistive button as a workaround since full-screen
+        // touch interception without Touch Exploration causes UX-breaking infinite loops.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            setupOverlay()
+            setupFloatingButton()
         }
     }
 
-    private fun setupOverlay() {
+    private fun setupFloatingButton() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
-        fullScreenOverlay = View(this).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            setOnTouchListener { _, event ->
-                val pointerCount = event.pointerCount
+        val frameLayout = FrameLayout(this)
 
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        recordedPath.reset()
-                        recordedPath.moveTo(event.rawX, event.rawY)
-                        isTracking = false
-                        true
-                    }
-                    MotionEvent.ACTION_POINTER_DOWN -> {
-                        if (pointerCount == 3) {
-                            isTracking = true
-                            startY1 = event.rawY
-                            // Getting other pointer locations correctly
-                            startY2 = event.getY(1) + (event.rawY - event.y)
-                            startY3 = event.getY(2) + (event.rawY - event.y)
-                        } else {
-                            recordedPath.lineTo(event.rawX, event.rawY)
-                        }
-                        true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        if (isTracking && pointerCount == 3) {
-                            val dy1 = event.rawY - startY1
-                            val dy2 = (event.getY(1) + (event.rawY - event.y)) - startY2
-                            val dy3 = (event.getY(2) + (event.rawY - event.y)) - startY3
-
-                            if (dy1 > SWIPE_THRESHOLD && dy2 > SWIPE_THRESHOLD && dy3 > SWIPE_THRESHOLD) {
-                                ThreeFingerAccessibilityService.instance?.triggerScreenshot()
-                                isTracking = false // Reset
-                                recordedPath.reset()
-                            }
-                        } else if (!isTracking) {
-                            recordedPath.lineTo(event.rawX, event.rawY)
-                        }
-                        true
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
-                        if (!isTracking && pointerCount < 3 && !recordedPath.isEmpty) {
-                            recordedPath.lineTo(event.rawX, event.rawY)
-                            // Replay non-3-finger gestures
-                            ThreeFingerAccessibilityService.instance?.dispatchReplayedGesture(recordedPath)
-                            recordedPath.reset()
-                        }
-                        if (pointerCount <= 3) {
-                            isTracking = false
-                        }
-                        true
-                    }
-                    else -> false
-                }
-            }
+        val button = Button(this).apply {
+            text = "\uD83D\uDCF7" // Camera Emoji
+            setBackgroundColor(Color.parseColor("#AA000000"))
+            setTextColor(Color.WHITE)
         }
 
+        val buttonSize = (50 * resources.displayMetrics.density).toInt()
+        val params = FrameLayout.LayoutParams(buttonSize, buttonSize)
+        frameLayout.addView(button, params)
+
         val layoutParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 100
         }
 
+        button.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = layoutParams.x
+                    initialY = layoutParams.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    isMoved = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val deltaX = event.rawX - initialTouchX
+                    val deltaY = event.rawY - initialTouchY
+
+                    if (Math.abs(deltaX) > 10 || Math.abs(deltaY) > 10) {
+                        isMoved = true
+                        layoutParams.x = initialX + deltaX.toInt()
+                        layoutParams.y = initialY + deltaY.toInt()
+                        windowManager?.updateViewLayout(frameLayout, layoutParams)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!isMoved) {
+                        ThreeFingerAccessibilityService.instance?.triggerScreenshot()
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+
+        floatingButtonView = frameLayout
+
         try {
-            windowManager?.addView(fullScreenOverlay, layoutParams)
+            windowManager?.addView(floatingButtonView, layoutParams)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -148,9 +140,9 @@ class ScreenshotService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (fullScreenOverlay != null) {
+        if (floatingButtonView != null) {
             try {
-                windowManager?.removeView(fullScreenOverlay)
+                windowManager?.removeView(floatingButtonView)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
